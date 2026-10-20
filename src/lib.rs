@@ -283,6 +283,42 @@ pub fn crepe(input: TokenStream) -> TokenStream {
     expanded.into()
 }
 
+/// The same program syntax as [`crepe!`], compiled to a description of the
+/// rules instead of an evaluator.
+///
+/// It runs the same checks (relation names, arity, `@input` goals, `_` and
+/// `ref` in goals, negation cycles), the same stratification, and the same
+/// left-to-right binding analysis `crepe!` uses to choose its indexes. It emits
+/// no relation store, no index and no fixpoint loop: one function
+/// `crepe_plan()` that builds the plan as data, so a different backend can
+/// decide how to evaluate it.
+///
+/// The emitted function names these types, which the caller must have in
+/// scope: `Plan`, `PlanRelation`, `PlanRelKind`, `PlanRule`, `PlanAtom`,
+/// `PlanClause` and `PlanField`. The expected shapes:
+///
+/// ```text
+/// Plan { relations: Vec<PlanRelation>, strata: Vec<Vec<&'static str>>, rules: Vec<PlanRule> }
+/// PlanRelation { name: &'static str, arity: usize, kind: PlanRelKind }
+/// PlanRelKind::{Input, Output, Intermediate}
+/// PlanRule { goal: PlanAtom, body: Vec<PlanClause>, stratum: usize, recursive: bool }
+/// PlanAtom { relation: &'static str, negated: bool, fields: Vec<PlanField> }
+/// PlanClause::{Atom(PlanAtom), Unsupported(&'static str)}
+/// PlanField::{Ignored, Ref(&'static str), NewVar(&'static str), BoundVar(&'static str),
+///             Const(u64), Expr(&'static str)}
+/// ```
+///
+/// `Const` is an integer literal. `Expr` is any other expression, kept as its
+/// source text for a backend to refuse; `Unsupported` is a clause that is not
+/// an atom (a condition, `let` or `for`).
+#[proc_macro]
+#[proc_macro_error]
+pub fn crepe_plan(input: TokenStream) -> TokenStream {
+    let program = parse_macro_input!(input as Program);
+    let context = Context::new(program);
+    make_plan(&context).into()
+}
+
 /// Function that takes a `TokenStream` as input, and returns a `TokenStream`
 type QuoteWrapper = dyn Fn(proc_macro2::TokenStream) -> proc_macro2::TokenStream;
 
@@ -1042,33 +1078,22 @@ fn make_clause(
             }
             let mut setters = Vec::new();
             let mut index_mode = Vec::new();
-            for (i, field) in fact.fields.iter().enumerate() {
+            for (i, (field, binding)) in fact
+                .fields
+                .iter()
+                .zip(bind_fields(&fact, datalog_vars))
+                .enumerate()
+            {
                 let idx = syn::Index::from(i);
-                match field {
-                    FactField::Ignored(_) => index_mode.push(IndexMode::Free),
-                    FactField::Ref(_, ident) => {
-                        index_mode.push(IndexMode::Free);
-                        datalog_vars.insert(ident.to_string());
-                        setters.push(quote! {
-                            let #ident = &__crepe_var.#idx;
-                        });
-                    }
-                    FactField::Expr(expr) => {
-                        if let Some(var) = is_datalog_var(expr) {
-                            let var_name = var.to_string();
-                            if datalog_vars.contains(&var_name) {
-                                index_mode.push(IndexMode::Bound);
-                            } else {
-                                index_mode.push(IndexMode::Free);
-                                datalog_vars.insert(var_name);
-                                setters.push(quote! {
-                                    let #field = __crepe_var.#idx;
-                                });
-                            }
-                        } else {
-                            index_mode.push(IndexMode::Bound);
-                        }
-                    }
+                index_mode.push(binding.mode());
+                match binding {
+                    FieldBinding::Ignored | FieldBinding::BoundVar(_) | FieldBinding::Const(_) => {}
+                    FieldBinding::Ref(ident) => setters.push(quote! {
+                        let #ident = &__crepe_var.#idx;
+                    }),
+                    FieldBinding::NewVar(_) => setters.push(quote! {
+                        let #field = __crepe_var.#idx;
+                    }),
                 }
             }
             let setters: proc_macro2::TokenStream = setters.into_iter().collect();
@@ -1146,6 +1171,186 @@ fn make_clause(
             })
         }
     }
+}
+
+/// How one field of a positive body atom is bound, given the variables bound
+/// by the clauses to its left. This is the binding analysis `make_clause`
+/// turns into an index choice; `crepe_plan!` reports it as data. Both paths
+/// call this one function, so the plan cannot drift from the evaluator.
+enum FieldBinding {
+    /// `_`: matches anything, binds nothing.
+    Ignored,
+    /// `ref x`: binds `x` to a reference into the tuple.
+    Ref(Ident),
+    /// A variable seen for the first time here: binds it.
+    NewVar(Ident),
+    /// A variable bound by an earlier clause: a lookup key.
+    BoundVar(Ident),
+    /// Any other expression: a lookup key that binds nothing.
+    Const(Box<Expr>),
+}
+
+impl FieldBinding {
+    fn mode(&self) -> IndexMode {
+        match self {
+            FieldBinding::Ignored | FieldBinding::Ref(_) | FieldBinding::NewVar(_) => {
+                IndexMode::Free
+            }
+            FieldBinding::BoundVar(_) | FieldBinding::Const(_) => IndexMode::Bound,
+        }
+    }
+}
+
+/// Classifies every field of `fact` and records the variables it binds in
+/// `datalog_vars`, left to right.
+fn bind_fields(fact: &Fact, datalog_vars: &mut HashSet<String>) -> Vec<FieldBinding> {
+    fact.fields
+        .iter()
+        .map(|field| match field {
+            FactField::Ignored(_) => FieldBinding::Ignored,
+            FactField::Ref(_, ident) => {
+                datalog_vars.insert(ident.to_string());
+                FieldBinding::Ref(ident.clone())
+            }
+            FactField::Expr(expr) => match is_datalog_var(expr) {
+                Some(var) if datalog_vars.contains(&var.to_string()) => FieldBinding::BoundVar(var),
+                Some(var) => {
+                    datalog_vars.insert(var.to_string());
+                    FieldBinding::NewVar(var)
+                }
+                None => FieldBinding::Const(expr.clone()),
+            },
+        })
+        .collect()
+}
+
+/// The body of `crepe_plan!`: the plan as a constructor expression.
+fn make_plan(context: &Context) -> proc_macro2::TokenStream {
+    let mut relations: Vec<&Relation> = context.all_relations().collect();
+    relations.sort_by_key(|r| r.name.to_string());
+    let relations = relations.iter().map(|rel| {
+        let name = rel.name.to_string();
+        let arity = rel.fields.len();
+        let kind = match rel.relation_type() {
+            Ok(RelationType::Input) => quote! { PlanRelKind::Input },
+            Ok(RelationType::Output) => quote! { PlanRelKind::Output },
+            _ => quote! { PlanRelKind::Intermediate },
+        };
+        quote! { PlanRelation { name: #name, arity: #arity, kind: #kind } }
+    });
+    let strata = context.strata.iter().map(|stratum| {
+        let names = stratum.iter().map(|n| n.to_string());
+        quote! { vec![#(#names),*] }
+    });
+    let rules = context.rules.iter().map(|rule| {
+        let stratum = context.strata.find_relation(&rule.goal.relation);
+        let mut recursive = false;
+        let mut datalog_vars: HashSet<String> = HashSet::new();
+        let body: Vec<_> = rule
+            .clauses
+            .iter()
+            .map(|clause| match clause {
+                Clause::Fact(fact) => {
+                    if context.strata.find_relation(&fact.relation) == stratum {
+                        recursive = true;
+                    }
+                    let fields: Vec<_> = if fact.negate.is_some() {
+                        fact.fields.iter().map(plan_goal_field).collect()
+                    } else {
+                        bind_fields(fact, &mut datalog_vars)
+                            .iter()
+                            .map(plan_field)
+                            .collect()
+                    };
+                    let atom = plan_atom(fact, fields);
+                    quote! { PlanClause::Atom(#atom) }
+                }
+                Clause::Expr(_) => quote! { PlanClause::Unsupported("condition") },
+                Clause::Let(_) => quote! { PlanClause::Unsupported("let") },
+                Clause::For(_) => quote! { PlanClause::Unsupported("for") },
+            })
+            .collect();
+        let goal = plan_atom(
+            &rule.goal,
+            rule.goal.fields.iter().map(plan_goal_field).collect(),
+        );
+        quote! {
+            PlanRule {
+                goal: #goal,
+                body: vec![#(#body),*],
+                stratum: #stratum,
+                recursive: #recursive,
+            }
+        }
+    });
+    quote! {
+        /// The rules of this program as data (generated by `crepe_plan!`).
+        pub fn crepe_plan() -> Plan {
+            Plan {
+                relations: vec![#(#relations),*],
+                strata: vec![#(#strata),*],
+                rules: vec![#(#rules),*],
+            }
+        }
+    }
+}
+
+fn plan_atom(fact: &Fact, fields: Vec<proc_macro2::TokenStream>) -> proc_macro2::TokenStream {
+    let relation = fact.relation.to_string();
+    let negated = fact.negate.is_some();
+    quote! { PlanAtom { relation: #relation, negated: #negated, fields: vec![#(#fields),*] } }
+}
+
+fn plan_field(binding: &FieldBinding) -> proc_macro2::TokenStream {
+    match binding {
+        FieldBinding::Ignored => quote! { PlanField::Ignored },
+        FieldBinding::Ref(ident) => {
+            let n = ident.to_string();
+            quote! { PlanField::Ref(#n) }
+        }
+        FieldBinding::NewVar(ident) => {
+            let n = ident.to_string();
+            quote! { PlanField::NewVar(#n) }
+        }
+        FieldBinding::BoundVar(ident) => {
+            let n = ident.to_string();
+            quote! { PlanField::BoundVar(#n) }
+        }
+        FieldBinding::Const(expr) => plan_const(expr),
+    }
+}
+
+/// A field of a goal or of a negated atom: every variable there must already
+/// be bound, so it is never `NewVar`.
+fn plan_goal_field(field: &FactField) -> proc_macro2::TokenStream {
+    match field {
+        FactField::Ignored(_) => quote! { PlanField::Ignored },
+        FactField::Ref(_, ident) => {
+            let n = ident.to_string();
+            quote! { PlanField::Ref(#n) }
+        }
+        FactField::Expr(expr) => match is_datalog_var(expr) {
+            Some(var) => {
+                let n = var.to_string();
+                quote! { PlanField::BoundVar(#n) }
+            }
+            None => plan_const(expr),
+        },
+    }
+}
+
+fn plan_const(expr: &Expr) -> proc_macro2::TokenStream {
+    if let Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Int(int),
+        ..
+    }) = expr
+    {
+        if let Ok(v) = int.base10_parse::<u64>() {
+            return quote! { PlanField::Const(#v) };
+        }
+    }
+    let text = quote!(#expr).to_string();
+    quote! { PlanField::Expr(#text) }
 }
 
 fn make_output_ty(context: &Context, hasher: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
