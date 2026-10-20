@@ -8,16 +8,34 @@ error[E0425]: cannot find value `n` in this scope
   --> tests/ui/unbound_variable.rs:13:45
    |
 13 |         Fib(n, x + y) <- Fib(n - 1, x), Fib(n - 2, y), (n <= 25);
-   |                                             ^ help: a local variable with a similar name exists: `x`
+   |                                             ^
+   |
+help: a local variable with a similar name exists
+   |
+13 -         Fib(n, x + y) <- Fib(n - 1, x), Fib(n - 2, y), (n <= 25);
+13 +         Fib(n, x + y) <- Fib(n - 1, x), Fib(x - 2, y), (n <= 25);
+   |
 
 error[E0425]: cannot find value `n` in this scope
   --> tests/ui/unbound_variable.rs:13:57
    |
 13 |         Fib(n, x + y) <- Fib(n - 1, x), Fib(n - 2, y), (n <= 25);
-   |                                                         ^ help: a local variable with a similar name exists: `x`
+   |                                                         ^
+   |
+help: a local variable with a similar name exists
+   |
+13 -         Fib(n, x + y) <- Fib(n - 1, x), Fib(n - 2, y), (n <= 25);
+13 +         Fib(n, x + y) <- Fib(n - 1, x), Fib(n - 2, y), (x <= 25);
+   |
 
 error[E0425]: cannot find value `n` in this scope
   --> tests/ui/unbound_variable.rs:13:13
    |
 13 |         Fib(n, x + y) <- Fib(n - 1, x), Fib(n - 2, y), (n <= 25);
-   |             ^ help: a local variable with a similar name exists: `x`
+   |             ^
+   |
+help: a local variable with a similar name exists
+   |
+13 -         Fib(n, x + y) <- Fib(n - 1, x), Fib(n - 2, y), (n <= 25);
+13 +         Fib(x, x + y) <- Fib(n - 1, x), Fib(n - 2, y), (n <= 25);
+   |

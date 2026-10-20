@@ -1,11 +1,11 @@
 //! Parsing logic
 
-use quote::{quote, ToTokens};
+use quote::{ToTokens, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::{
-    parenthesized, parse_quote, token, Attribute, Expr, ExprLet, Field, Generics, Ident, Pat,
-    Result, Token, Visibility,
+    Attribute, Expr, ExprLet, Field, Generics, Ident, Pat, Result, Token, Visibility,
+    parenthesized, parse_quote, token,
 };
 
 #[derive(Clone)]

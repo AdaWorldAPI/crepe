@@ -145,9 +145,11 @@ fn test_showcase_all_features() {
         .collect();
 
     // Seattle->Portland: distance(100) + seattle.weight(750) + portland.weight(650) = 1500
-    assert!(weighted_vec
-        .iter()
-        .any(|(x, y, s)| *x == "Seattle" && *y == "Portland" && *s == 1500));
+    assert!(
+        weighted_vec
+            .iter()
+            .any(|(x, y, s)| *x == "Seattle" && *y == "Portland" && *s == 1500)
+    );
 
     // Test heavy nodes (weight > 500)
     let heavy_vec: Vec<_> = heavy_nodes

@@ -19,7 +19,7 @@ use proc_macro_error::{abort, emit_error, proc_macro_error};
 use quote::{format_ident, quote, quote_spanned};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
-use syn::{parse_macro_input, spanned::Spanned, Expr, Ident, Lifetime, Pat, Type};
+use syn::{Expr, Ident, Lifetime, Pat, Type, parse_macro_input, spanned::Spanned};
 
 use parse::{Clause, Fact, FactField, For, Program, Relation, RelationType, Rule};
 use strata::Strata;
@@ -462,20 +462,20 @@ impl Context {
         for rule in &program.rules {
             let goal_stratum = strata.find_relation(&rule.goal.relation);
             for clause in &rule.clauses {
-                if let Clause::Fact(fact) = clause {
-                    if fact.negate.is_some() {
-                        let fact_stratum = strata.find_relation(&fact.relation);
-                        if goal_stratum == fact_stratum {
-                            abort!(
-                                fact.relation.span(),
-                                "Negation of relation '{}' creates a dependency cycle \
-                                and cannot be stratified.",
-                                fact.relation
-                            );
-                        }
-                        // This should be guaranteed by reverse topological order
-                        assert!(goal_stratum > fact_stratum);
+                if let Clause::Fact(fact) = clause
+                    && fact.negate.is_some()
+                {
+                    let fact_stratum = strata.find_relation(&fact.relation);
+                    if goal_stratum == fact_stratum {
+                        abort!(
+                            fact.relation.span(),
+                            "Negation of relation '{}' creates a dependency cycle \
+                            and cannot be stratified.",
+                            fact.relation
+                        );
                     }
+                    // This should be guaranteed by reverse topological order
+                    assert!(goal_stratum > fact_stratum);
                 }
             }
         }
@@ -1344,10 +1344,9 @@ fn plan_const(expr: &Expr) -> proc_macro2::TokenStream {
         lit: syn::Lit::Int(int),
         ..
     }) = expr
+        && let Ok(v) = int.base10_parse::<u64>()
     {
-        if let Ok(v) = int.base10_parse::<u64>() {
-            return quote! { PlanField::Const(#v) };
-        }
+        return quote! { PlanField::Const(#v) };
     }
     let text = quote!(#expr).to_string();
     quote! { PlanField::Expr(#text) }
