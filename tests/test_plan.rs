@@ -78,6 +78,19 @@ mod mixed {
     }
 }
 
+mod let_bound {
+    use super::*;
+    use crepe::crepe_plan;
+    crepe_plan! {
+        @input
+        struct Input(u32);
+        @output
+        struct Out(u32);
+        Out(x) <- let x = 1, Input(x);
+        Out(y) <- Input(y), let z = y + 1, Input(z);
+    }
+}
+
 use PlanField::*;
 
 fn atom(relation: &'static str, negated: bool, fields: Vec<PlanField>) -> PlanAtom {
@@ -139,4 +152,30 @@ fn recursion_negation_and_conditions_are_reported_not_hidden() {
     assert!(at("Edge") < at("Reach"));
     assert!(at("Blocked") < at("Free"));
     assert_eq!(free.stratum, at("Free"));
+}
+
+// A variable bound by `let` is bound for every later atom, exactly as the evaluator
+// treats it (`make_clause` records the let pattern's variables). The plan keeps
+// reporting the let itself as unsupported, but must not call a later use of its
+// variable a new variable.
+#[test]
+fn let_bound_variables_are_bound_in_later_atoms() {
+    let p = let_bound::crepe_plan();
+    assert_eq!(
+        p.rules[0].body,
+        vec![
+            PlanClause::Unsupported("let"),
+            PlanClause::Atom(atom("Input", false, vec![BoundVar("x")])),
+        ]
+    );
+    assert_eq!(p.rules[0].goal, atom("Out", false, vec![BoundVar("x")]));
+    // The let in the middle binds `z`; `y` stays bound from the first atom.
+    assert_eq!(
+        p.rules[1].body,
+        vec![
+            PlanClause::Atom(atom("Input", false, vec![NewVar("y")])),
+            PlanClause::Unsupported("let"),
+            PlanClause::Atom(atom("Input", false, vec![BoundVar("z")])),
+        ]
+    );
 }

@@ -1266,7 +1266,13 @@ fn make_plan(context: &Context) -> proc_macro2::TokenStream {
                     quote! { PlanClause::Atom(#atom) }
                 }
                 Clause::Expr(_) => quote! { PlanClause::Unsupported("condition") },
-                Clause::Let(_) => quote! { PlanClause::Unsupported("let") },
+                Clause::Let(guard) => {
+                    // The plan does not model `let`, but the variables it binds are
+                    // bound for every later atom, as `make_clause` records them for
+                    // the evaluator; leaving them out would report a later use as new.
+                    pat_datalog_vars(&guard.pat, &mut datalog_vars);
+                    quote! { PlanClause::Unsupported("let") }
+                }
                 Clause::For(_) => quote! { PlanClause::Unsupported("for") },
             })
             .collect();
